@@ -1,0 +1,934 @@
+\section{Gast-Monitor für uvmm}
+
+Mit uvmm ist es möglich, sicher voneinander isolierte virtualisierte
+Gast-Systeme (z.B. Linux) auf Fiasco.OC auszuführen. Um den Zustand solcher
+Gast-Instanzen zur Laufzeit besser analysieren zu können, sollte ein
+,,Gast-Monitor'' entwickelt werden, der es erlaubt, Teile des Zustandes von
+Gast-Instanzen über ein \textit{GNU Readline} Interface auszugeben und
+gegebenenfalls zu modifizieren. Der Monitor sollte dabei in Release-Builds
+keinen Einfluss auf den uvmm Binärcode haben, also durch einfaches Setzen von
+Makefile Flags mittels bedingter Kompilierung bereits zur Kompilierzeit
+deaktiviert werden können. Der Gast-Monitor implementiert die Ausgabe von:
+
+\begin{itemize}
+  \item CPU Zustand (Register etc.)
+  \item Speicher-Inhalt
+  \item Seitentabellen
+  \item Device Tree
+  \item Weiterem Architekturspezifischem Systemzustand
+\end{itemize}
+
+Abschnitt~\ref{sec:uvmm_monitor_design} beschreibt Design und Implementierung
+des Gast-Monitors. Folgende Abschnitte veranschaulichen anhand von Beispielen
+die wichtigsten Gast-Monitor Befehle.
+
+\subsection{Design und Implementierung des Gast-Monitors}
+\label{sec:uvmm_monitor_design}
+
+Der Gast-Monitor besteht aus zwei Komponenten, die über das \textit{L4::Vcon}
+Protokoll kommunizieren: dem ,,CLI Server'' und dem ,,Monitor Interface'' das
+Teil von uvmm selbst ist.
+
+\subsubsection{CLI Server}
+
+% TODO: drop in replacement
+% TODO: ned example
+
+Der CLI Server ist ein von uvmm unabhängiges L4Re Programm welches ein auf GNU
+Readline basiertes Kommandozeilen-Interface implementiert. Gibt der Nutzer
+einen Befehl ein, wird ein \textit{virtueller Interrupt (IRQ)} an uvmm gesendet.
+uvmm liest daraufhin über das Vcon Protokoll den Befehl + Zeilenumbruch ein,
+verarbeitet ihn, und sendet eine oder mehrere Zeilen Ausgabe zurück an den CLI
+Server.
+
+Das Ende der Ausgabe wird immer durch die Zeichenkombination EOT +
+Zeilenumbruch signalisiert. Der CLI Server gibt seinerseits die von uvmm
+erhaltene Ausgabe aus und setzt das Einlesen von Befehlen fort.
+
+Zusätzlich implementiert der CLI Server Befehlsvervollständigung ähnlich wie
+z.B. gängige Unix Shells. Hierzu wird bei Eingabe des Tabulatorzeichens die
+aktuelle Befehlszeile bis zur Cursorposition + Tabulatorzeichen + Zeilenumbruch
+über den zuvor beschriebenen Mechanismus an uvmm gesendet. uvmm ermittelt dann
+mögliche Vervollständigungen für das letzte Wort der Befehlszeile und sendet
+diese -getrennt durch Zeilenumbrüche und wieder gefolgt von EOT + Zeilenumbruch-
+zurück an den CLI Server, der von Readline bereitgestellte Funktionen nutzt um
+die aktuelle Befehlszeile automatisch zu vervollständigen.
+
+Der CLI Server setzt sich aus zwei Singleton Klassen zusammen:
+\texttt{Readline\_loop} und \texttt{uvmm\_cli\_vcon}. Erstere implementiert
+eine Endlosschleife in der mittels Readline Nutzereingabe gelesen wird, sowie
+Befehls-Vervollständigung, History-Verwaltung und einige String-Verarbeitungs
+Funktionen.  Letztere ist eine von \texttt{L4Re::Util::Vcon\_svr} abgeleitete
+Klasse, welche die vererbten Funktionen \texttt{vcon\_read} und
+\texttt{vcon\_write} überschreibt, die das Senden/Empfangen von Daten
+an/von uvmm implementieren.
+
+Listing~\ref{lst:readline_loop} verdeutlicht die Struktur der in
+\texttt{Readline\_loop} implementierten Readline Schleife.
+
+\begin{mintlisting}[label=lst:readline_loop]{mintcpp}{\texttt{Readline\_loop::run} (aus \texttt{uvmm\_cli.cc})}
+void Readline_loop::run(char const *prompt)
+{
+  for (;;)
+    {
+      // read next command
+      char *line = readline(prompt);
+
+      // ...
+
+      // send (preprocessed) command to uvmm
+      uvmm_cli_vcon::get()->send(line_preprocessed);
+
+      // print uvmm's response
+      std::cout << uvmm_cli_vcon::get()->receive();
+    }
+}
+\end{mintlisting}
+
+\texttt{uvmm\_cli\_vcon} wird vom CLI Server in einen ,,Server Loop''
+eingehängt. Der Server Loop realisiert eine high-level Abstraktion der in
+Abschnitt~\ref{sec:l4re_pi} eingeführten IPC Mechanismen. Dabei werden die
+Interfaces von von \texttt{L4::Epiface} abgeleiteten Objekte zur Laufzeit
+anderen Programmen zur Verfügung gestellt. Diese können (z.B. über Ned)
+Capabilities auf erstere erhalten und per Remote Procedure Calls (RPCs) deren
+Member-Funktionen aufrufen.
+
+Listing~\ref{lst:registry_server} zeigt das Aufsetzen des Server Loops.  Wird
+die unter dem Namen \texttt{"mon"} exportierte Capability vom Typ
+\texttt{L4::Vcon} von Ned in uvmm hereingereicht, kann uvmm so per
+\texttt{uvmm\_cli\_vcon::vcon\_read/write} Daten mit dem CLI Server
+austauschen. Man beachte, dass Aufrufe dieser Funktionen im Haupt-Thread des
+CLI-Servers abgehandelt werden, während die Readline Schleife in einem
+Neben-Thread läuft.
+
+\begin{mintlisting}[label=lst:registry_server]{mintcpp}{CLI Server Server Loop}
+// start readline thread
+std::thread readline_thread(run_readline, "monitor> ");
+
+// create registry
+L4Re::Util::Registry_server<L4Re::Util::Br_manager_hooks> registry_server;
+
+registry_server.registry()->register_obj(uvmm_cli_vcon::get(), "mon");
+
+// start server loop
+registry_server.loop();
+\end{mintlisting}
+
+Der Austausch von Daten zwischen dem CLI server und uvmm erfolgt über zwei
+Puffer, \texttt{uvmm\_cli\_vcon::\_send\_buf} und
+\texttt{uvmm\_cli\_vcon::\_receive\_buf}.  \texttt{uvmm\_cli\_vcon::send}
+beschreibt den Sende-Puffer der von uvmm mittels
+\texttt{uvmm\_cli\_vcon::vcon\_read} ausgelesen wird. Umgekehrt schreibt uvmm
+mittels \texttt{uvmm\_cli\_vcon::vcon\_write} Daten in den Empfangs-Puffer,
+welcher mittels \texttt{uvmm\_cli\_vcon::receive} ausgelesen wird.  Um diesen
+Ablauf zu realisieren, müssen einige Synchronisations-Vorkehrungen getroffen
+werden um Race-Conditions u.ä vorzubeugen.
+
+Da der Zugriff auf beide Puffer sowohl vom Readline Thread als auch asynchron
+(ausgelöst von uvmm) im Haupt-Thread  erfolgt, müssen Zugriffe auf diese mit
+Mutexen synchronisiert werden.  Weiterhin ist es wünschenswert, dass
+\texttt{send} solange blockiert, bis uvmm mit der gesamten Ausgabe geantwortet
+hat. So wird garantiert, dass uvmm immer maximal einen Befehl zur Zeit
+abarbeitet, was die Implementiertung des Monitor Interface vereinfacht. Nach
+Rückkehr von \texttt{send}, kann demnach auch uvmms Ausgabe sofort mittels
+einem nicht-blockierenden Aufruf von \texttt{receive} ausgelesen werden.  Dies
+ist mittels einer Semaphore implementiert, die in \texttt{send} dekrementiert
+und in \texttt{vocn\_write} wieder inkrementiert wird wenn die gesamte Ausgabe
+von uvmm empfangen worden ist.
+
+Listing~\ref{lst:uvmm_cli} zeigt vereinfachte Darstellungen von \texttt{send},
+\texttt{receive}, \texttt{vcon\_read} und \texttt{vcon\_write}, die diesen
+Prozess veranschaulichen. Man beachte, dass dieser vor allem dadurch
+kompliziert wird, dass uvmm den Sende- bzw. Empfangs-Puffer nicht zwangsweise
+,,auf einmal'' (nicht einmal zeilenweise) liest/beschreibt. Die Variable
+\texttt{\_ready\_to\_receive} ist immer dann gesetzt, wenn
+\texttt{uvmm\_cli\_vcon} uvmm Ausgabe erwartet. Damit wird verhindert, dass
+verirrte Aufrufe von \texttt{vcon\_write} durch uvmm während des Sendens eines
+Befehls oder nach Empfangen der Ausgabe den Empfangs-Puffer verändern.
+
+\begin{mintlisting}[label=lst:uvmm_cli]{mintcpp}{\texttt{uvmm\_cli\_vcon} Vcon Interface (aus \texttt{uvmm\_cli.cc})}
+// uvmm requests to read 'size' characters into 'buf'
+unsigned uvmm_cli_vcon::vcon_read(char *buf, unsigned size)
+{
+  std::lock_guard<std::mutex> lock(_send_mutex);
+
+  if (_send_buf.empty())
+    return L4_VCON_READ_STAT_DONE; // signal to uvmm that there is no more to read
+
+  if (size == 0)
+    return 0; // ignore read requests of size zero
+
+  if (size < _send_buf.size())
+    {
+      // send the first 'size' characters of '_send_buf'
+      memcpy(buf, _send_buf.data(), size);
+      _send_buf = _send_buf.substr(size);
+    }
+  else
+    {
+      // uvmm wants to read all available characters
+
+      // send every character in '_send_buf'
+      memcpy(buf, _send_buf.data(), _send_buf.size());
+
+      // signal to uvmm that there is not more to read
+      size = _send_buf.size() | L4_VCON_READ_STAT_DONE;
+
+      _send_buf.clear();
+      _ready_to_receive = true;
+    }
+
+  return size;
+}
+
+// uvmm requests to write 'size' characters from 'buf'
+void uvmm_cli_vcon::vcon_write(const char *buf, unsigned size)
+{
+  if (!_ready_to_receive)
+    return; // ignore request if there is still a 'send' in progress
+
+  if (size == 0)
+    return; // return write requests of size zero
+
+  std::lock_guard<std::mutex> lock(_receive_mutex);
+
+  // check whether output sent by uvmm contains the EOT character...
+  char const *eot = static_cast<char const *>(memchr(buf, (char)uvmm_cli::PROTO_EOT, size));
+
+  if (eot)
+    {
+      // ...if so, we have received the complete output...
+      _receive_buf << std::string(buf, eot);
+      _ready_to_receive = false;
+
+      // ...and can thus unblock 'send' so the next command can be sent to uvmm
+      _sem->up();
+    }
+  else
+    {
+      _receive_buf << std::string(buf, buf + size);
+    }
+}
+
+// send the command in 'buf' to uvmm
+void uvmm_cli_vcon::send(std::string const &buf)
+{
+  {
+    std::lock_guard<std::mutex> lock(_send_mutex);
+
+    _send_buf = buf + '\n';
+  }
+
+  // signal uvmm to start reading the command
+  _irq.trigger();
+
+  // block until the command's output has been returned by uvmm
+  _sem->down();
+}
+
+std::string uvmm_cli_vcon::receive()
+{
+  std::lock_guard<std::mutex> lock(_receive_mutex);
+
+  std::string ret(_receive_buf.str());
+
+  // clear the receive buffer
+  _receive_buf.str("");
+
+  return ret;
+}
+\end{mintlisting}
+
+Listing~\ref{lst:uvmm_cli_ned} zeigt schließlich ein Ned-Skript mit dem uvmm
+sowie der CLI Server gestartet und verbunden werden können. Über das
+Hilfs-Module \texttt{vmm} wird eine uvmm Instanz mit einem Linux Gast (mit
+Kernel Image \texttt{bzImage}) gestartet. Durch das modulare Design ist es
+denkbar, den CLI Server durch ein beliebiges anderes L4Re Programm zu ersetzen,
+das über das gleiche Protokoll mit uvmms Monitor Interface kommuniziert.
+
+\begin{mintlisting}[label=lst:uvmm_cli_ned]{mintlua}{Ein Gast-Monitor Ned-Skript}
+local l4 = require 'l4'
+local l = l4.default_loader
+
+local vmm = require 'vmm'
+
+mon = l:new_channel()
+
+vmm.start_vm
+  {
+    id       = 1,
+    mem      = 196,
+    kernel   = 'rom/bzImage',
+    bootargs = 'console=hvc0 ramdisk_size=13000 root=/dev/ram1 nokaslr',
+    rd       = 'rom/ramdisk.rd',
+    fdt      = 'rom/virt-pc.dtb',
+    cpus     = 1,
+    mon      = mon
+  }
+
+l:start
+  (
+    { caps = { mon = mon:svr() } },
+    "rom/uvmm_cli"
+  )
+\end{mintlisting}
+
+\subsubsection{Monitor Interface}
+
+Auf uvmm Seite ist das Monitor-Interface über eine Reihe von ,,Command
+Handler'' Klassen realisiert. Diese Klassen greifen auf für den Gast-Monitor
+interessante Daten und Funktionen uvmm interner Klassen zu. Jeder Command
+Handler ist eine Klassen-Template, welche über Vererbung mit einer
+entsprechenden uvmm Klasse verknüpft ist. Am Beispiel der fiktiven Klasse
+\texttt{X}:
+
+\begin{mintlisting}{mintcpp}{Aufbau eines Command Handlers}
+namespace Monitor {
+
+enum : bool {
+#ifdef CONFIG_MONITOR
+  Enabled = true,
+#else
+  Enabled = false,
+#endif
+}
+
+template<bool, typename T>
+class X_cmd_handler {};
+
+template<typename T>
+class X_cmd_handler<true, T> : public Cmd
+{
+  // ...
+
+  X *x()
+  { return static_cast<T *>(this); }
+
+  X const *x() const
+  { return static_cast<T const *>(this); }
+};
+
+}
+
+class X : private Monitor::X_cmd_handler<Monitor::Enabled, X>
+{
+  friend X_cmd_handler<Monitor::Enabled, X>;
+
+  // ...
+};
+\end{mintlisting}
+
+Dieses Design hat einige Vorteile:
+
+\begin{itemize}
+  \item Ist \texttt{CONFIG\_MONITOR} zur Übersetzungszeit nicht definiert,
+        erbt \texttt{X} von einer leeren Klassen welche daher dank
+        \textit{empty base optimization} vom Compiler komplett
+        wegoptimisiert werden kann.
+  \item Es muss zur Laufzeit nicht für jedes instanziierte Objekt vom Typ
+        \texttt{X} ein separates Objekt vom Typ \texttt{X\_cmd\_handler}
+        Objekt instanziiert und mit ersterem verknüpt werden.
+  \item \texttt{X\_cmd\_handler} kann auf alle Member von \texttt{X} zugreifen
+        (per \texttt{x()->...}).
+\end{itemize}
+
+\texttt{Monitor::Cmd} ist eine abstrakte Klasse, die das Interface definiert,
+das ein Command Handler implementieren muss um einen Monitor Befehl zu
+realisieren. Dazu gehören insbesondere \texttt{Cmd::exec} und
+\texttt{Cmd::complete}, welche die bei Ausführung und Vervollständigung eines
+Monitor Befehls ausgeführten Aktionen implementieren.  Über
+\texttt{Cmd::register\_toplevel} kann ein Command Handler sich in seinem
+Konstruktor zudem unter einem Namen in eine uvmm interne Tabelle eintragen.
+Empfängt uvmm einen Monitor Befehl, wird dann in dieser Tabelle nach einem
+entsprechenden Command Handler gesucht und dessen \texttt{exec} Funktion
+aufgerufen.  Dies geschieht immer dann, wenn uvmm einen IRQ vom CLI Server
+empfängt. Der IRQ wird von der IRQ Endpoint Klasse \texttt{Cmd\_control}
+abgehandelt, die auch die \texttt{L4::Vcon} Capability hält, über die mit dem
+CLI Server kommuniziert wird. Listing~\ref{lst:cmd_control} skizziert diesen
+Prozess.
+
+\begin{mintlisting}[label=lst:cmd_control]{mintcpp}{Befehls-Ausführung auf uvmm Seite per \texttt{Cmd\_control}}
+class Cmd_control : public L4::Irqep_t<Cmd_control>
+{
+public:
+  // ...
+  Cmd_control()
+  : _con(L4Re::Env::env()->get_cap<L4::Vcon>("mon"))
+  {}
+
+private:
+  // ...
+  L4::Cap<L4::Vcon> _con;
+}
+
+void Cmd_control::bind(L4::Registry_iface *registry)
+{ _con->bind(0, registry->register_irq_obj(this)); }
+
+void Cmd_constrol::handle_irq()
+{
+  std::string cmdline;
+  if (!get_line(&cmdline)) // uses _con->read
+    return;
+
+  handle_cmd(cmdline);
+}
+
+void Cmd_control::handle_cmd(std::string const &cmdline)
+{
+  Monitor::Cmd *handler = find_cmd_handler(cmdline);
+
+  if (!handler) {
+    fprintf(_f, "Monitor: Unknown cmd %.*s\n", cmd_line);
+    return;
+  }
+
+  Monitor::Arglist arglist(cmdline); // utility argument stack
+
+  // execute command, all command output should be written to the the file
+  // handle _f, arglist allows retrieving (typed) command arguments in order
+  handler->exec(_f, &arglist);
+}
+\end{mintlisting}
+
+Nicht alle Command Handler müssen \texttt{register\_toplevel} aufrufen. Einige
+von ihnen implementieren vielmehr ,,Unter-Befehle''. Ihre \texttt{exec}
+Funktionen werden direkt von einem übergeordneten Command Handler aufgerufen.
+
+\subsection{CPU-Zustand}
+
+uvmm unterstützt eine Reihe von Host/Gast Architekturen. Einige Teile von uvmms
+Quellcode sind daher architekturspezifisch. Der Quellcode ist
+wie in Listing~\ref{lst:uvmm_tree} dargestellt aufgebaut:
+
+\begin{mintlisting}[label=lst:uvmm_tree]{minttext}{uvmm Verzeichnisstruktur}
+uvmm
+  server
+    src
+      ARCH-amd64
+        // architektureabhängige Quellcode-Dateien
+        monitor
+      // weite Architektur-Verzeichnisse
+      debugger
+      monitor
+      // architektureunabhängige Quellcode-Dateien
+\end{mintlisting}
+
+Die \texttt{ARCH-*} Verzeichnisse enthalten architekturspezifischen Code.
+Beispielsweise enhalten alle von ihnen eine Implementierung der Klasse
+\texttt{Cpu\_dev}, definiert in \texttt{Arch-*/cpu\_dev.h/cc} welche den
+Zustand einer Gast-CPU abstrahiert. Alle diese Klassen erben ihrerseits
+architekturunabhängige Funktionalität von \texttt{Generic\_cpu\_dev} definiert
+in \texttt{generic\_cpu\_dev.hpp}. Zur Kompilierzeit wird über die Makefile
+Variable \texttt{ARCH} kontrolliert welche \texttt{cpu\_dev.h/cc} Variante
+kompiliert und mit dem restlichen Code gelinkt wird.
+
+Das Monitor Interface integriert nach demselben Prinzip architekturunabhängigen
+und architekturspezifischen Quellcode, z.B. die Klassen \texttt{Cpu\_dev\_cmd\_handler} (in \texttt{ARCH-*/monitor/cpu\_dev\_cmd\_handler.h} und \texttt{Cpu\_dev\_array\_cmd\_handler} (in
+\texttt{monitor/cpu\_dev\_array\_cmd\_handler.h}).
+
+Letztere implementiert den in Listing~\ref{lst:cpu_cmd} gezeigten Befehl.
+So kann dann etwa mit \texttt{cpu 0 regs} der Unterbefehl \texttt{regs},
+welcher die Ausgabe des aktuellen CPU-Register-Zustandes bewirkt, an die
+erste Gast-CPU weiteregeleitet werden. Dieser Unterbefehl wird dann von
+\texttt{Cpu\_dev\_cmd\_handler} abgearbeitet. Welche Unterbefehle verfügbar
+sind ist demnach architekturabhängig, z.B. kann unter x86 zusätzlich zu den
+Standard-CPU-Registern \textit{Virtual Machine Extensions (VMX)} spezifischer
+Zustand mittels \texttt{cpu <i> vmx} ausgegeben werden wie in Listing~\ref{lst:cpu_cmd} demonstriert.
+
+\begin{mintlisting}[label=lst:cpu_array_cmd]{minttext}{\texttt{cpu} Monitor Befehl}
+~\color{red}{monitor>}~ help cpu
+CPU state
+* 'cpu list': list available CPUs
+* 'cpu <i> <subcmd>': execute <subcmd> for CPU <i>
+\end{mintlisting}
+
+\begin{mintlisting}[label=lst:cpu_cmd]{minttext}{x86 \texttt{cpu} Unterbefehle}
+~\color{red}{monitor>}~ cpu 0 regs
+RAX ffffffff819b9ec0
+RBX 0
+RCX 6e0
+RDX 1f
+RSI 202c2523
+RDI 46
+RSP 0
+RBP 0
+R8 0
+R9 ffffffff822507c0
+R10 ffffffff8224f540
+R11 18
+R12 ffffffff8280e900
+R13 ffffffff828162e0
+R14 0
+R15 0
+RIP ffffffff819ba051
+~\color{red}{monitor>}~ cpu 0 vmx
+(C) VPID: 0x0
+(C) Int notification vector: 0x0
+(C) EPTP index: 0x0
+(C) EPT pointer: 0x0
+...
+\end{mintlisting}
+
+\subsection{RAM}
+
+Mit dem \texttt{ram} Monitor Befehl lässt sich der von uvmm verwaltete Speicher
+untersuchen. Dieser beinhaltet den gesamten physischen Gast Speicher.
+Listing~\ref{lst:ram_cmd} zeigt den Gebrauch dieses Befehls. Der angegebene
+Dataspace ist der physische Gast Speicher der an Adresse \texttt{0x01200000} in
+uvmms virtuellen Adressraum gemappt ist. Der nachfolgende \texttt{dump}
+Unterbefehl gibt die ersten 80 in diesem gespeicherten Bytes aus.
+
+\begin{mintlisting}[label=lst:ram_cmd]{minttext}{\texttt{ram} Monitor Befehl}
+~\color{red}{monitor>}~ help ram
+Usage:
+* ram ds: List RAM dataspaces
+* ram dump <addr> [<n> [(b|w|d|q)]]: Dump RAM region
+where: * b = byte, w = word, d = double word, q = quad word
+       * <n> = number of entries to be dumped
+~\color{red}{monitor>}~ ram ds
+Dataspace  Guest area             Size        Local address  Phys?
+       23  0x00000000-0x0c400000  0x0c400000  0x01200000     Y
+~\color{red}{monitor>}~ ram dump 0x01200000 10 q
+0x0000000001200000: 0xf668408b48000003
+0x0000000001200008: 0x2444c64174026040
+0x0000000001200010: 0x4c00000002be0257
+0x0000000001200018: 0x0004bd4150247c8d
+0x0000000001200020: 0x8bfffffea1e90000
+0x0000000001200028: 0x830f044539182444
+0x0000000001200030: 0xfffee4e9fffffeb2
+0x0000000001200038: 0x8d4c00000001beff
+0x0000000001200040: 0x000002bd4150247c
+0x0000000001200048: 0x02befffffe7ae900
+\end{mintlisting}
+
+\subsection{Seitentabellen}
+
+Ein weiteres Feature des Gast-Monitors ist die Möglichkeit,
+die Seitentabellen-Auflösung des Gast-Systems darzustellen.
+
+Hierfür muss teilweise auf virtualisierte Gast-Register zugegriffen werden.
+Die L4Re vCPU API implement auf Kernel Threads basierte virtuelle Prozessoren.
+Neben Virtualisierung werden diese z.B. auch für die Implementierung von
+User-Space Threads genutzt. Der Zustand jeder vCPU wird durch eine Objekt vom
+Typ \texttt{l4\_vcpu\_state\_t} beschrieben. uvmm verwaltet pro Gast-CPU ein
+Objekt vom (architekturspezifischen) Typ \texttt{Vmm::Vcpu\_ptr} welches selbst
+ein dünner Wrapper um einen Zeiger auf ein \texttt{l4\_vcpu\_state\_t} Objekt
+ist.  So können uvmm Klassen über \texttt{Vmm::Vcpu\_ptr} u.a. auf von Fiaso
+zur Verfügung gestellte Gast-Register zugreifen.
+
+Zudem ist es notwendig, in den Seitentabellen gespeicherte physische Gast- in
+virtuelle Host-Adressen übersetzen zu können. uvmm verwaltet Gast-Speicher über
+sogenannte \textit{Regionen}. Es werden verschiedene Arten von Regionen
+unterschieden, solche vom Typ \texttt{Vmm::Region\_type::Ram} bilden
+kontinuierliche Adressbereiche im physischen Speicher eines Gasts ab.
+
+Die Klasse \texttt{Vm\_mem} erlaubt es mittels der Funktion
+\texttt{Vm\_mem::find\_ram\_region} die zu einer physischen Gast-Adresse
+gehörige Region, sowie die Adresse an der diese in uvmms virtuellen
+Adressraum abgebildet ist, zu ermitteln. Auf \texttt{Vm\_mem} aufbauend
+implementiert \texttt{Cached\_gphys\_to\_hvirt} die effiziente Übersetzung von
+pyhsischen Gast Adressen in virtuelle Host Adressen: Liegt eine Adresse in
+derselben Region wie die zuvor angefragte, reduziert sich die Übersetzung auf
+eine einfache Interpolation vom dieser Region zugehörigen physischen
+Gast-Speicher Bereich in den zugehörigen virtuellen Host-Speicher Bereich wie
+in Listing~\ref{lst:cached_gphys_to_hvirt} dargestellt.
+
+\begin{mintlisting}[label=lst:cached_gphys_to_hvirt]{mintcpp}{\texttt{Cached\_gphys\_to\_hvirt::lookup}}
+int Cached_gphys_to_hvirt::lookup(l4_addr_t gphys, l4_addr_t *hvirt)
+{
+  Guest_addr ga(gphys);
+
+  if (_cached_start.get() == -1U || _cached_start > ga || _cached_end < ga)
+    {
+      Ds_handler *ds_handler;
+
+      int err = _mmap->find_ram_region(ga, &_cached_start, &_cached_end, &ds_handler);
+
+      if (err < 0)
+        return err;
+
+      _cached_ds_local_start = ds_handler->local_start();
+    }
+
+  *hvirt = _cached_ds_local_start + (ga - _cached_start);
+
+  return L4_EOK;
+}
+
+\end{mintlisting}
+
+Der Einfachheit halber soll hier nur die Adressübersetzung für x86\_64 im 64
+Bit \textit{Long Mode} betrachtet werden\footnote{Die Adressübersetzung im 32
+Bit \textit{Protected Mode} funktioniert ähnlich, unterscheidet sich aber in
+Details wie z.B. der unterstützten Seitengrößen.}. Die x86\_64 Architektur
+implementiert Hardware-unterstützte virtuelle Adressräume über mehrstufige
+Seitentabellen. Dafür muss das \textit{Paging (PG)} Bit im Kontrollregister
+\texttt{CR0} gesetzt sein.
+
+Obwohl im Long Mode 64 Bit zur Adressierung des virtuellen Adressraumes zur
+Verfügung stehen, unterstützen gängige Prozessoren lediglich $2^{48}$ Byte =
+256 TiB große virtuelle Adressräume. Bits 48 bis 63 jeder virtuellen Adresse
+sind dabei immer gleich Bit 47, so dass gültige virtuelle Adressen trotzdem
+eindeutig sind.  Die Standard-Seitengröße ist 4 KiB. Es ist jedoch auch möglich
+(falls von der Hardware unterstützt) den Prozessor so zu konfigurieren, dass 2
+MiB, oder 1 GiB Seiten verwendet werden.
+
+Der Übersetzungsprozess ist für 4 KiB Seiten vierstufig, für 2 MiB Seiten
+dreistufig und für 1 GiB Seiten zweistufig. Die dabei verwendeten Tabellen
+werden in der letzten Übersetzungsstufe meist als Seitentabellen und in
+vorangehenden Übersetzungsstufen als Seitenverzeichnisse bezeichnet.
+Tabelle~\ref{tbl:x86_pt_names} führt die gebräuchlichen konkreten Bezeichnungen
+für die vier x84\_64 Seitenverzeichnisse/-tabellen auf\footnote{Diese sind
+historisch bedingt, vergleiche z.B. \url{https://www.pagetable.com/?p=14}.}.
+
+\begin{table}[H]
+  \centering
+  \caption{Bezeichnungen für x86\_64 Seitenverzeichnisse/-tabellen}
+  \label{tbl:x86_pt_names}
+  \vspace{10pt}
+  \label{tbl:page_directory_table_names}
+  \rowcolors{2}{}{gray!10}
+  \begin{tabular}{rl}
+    \toprule
+    Stufe & Bezeichnung \\
+    \midrule
+    1 & \textit{Page Map Level 4 (PML4)} \\
+    2 & \textit{Page Directory Pointer Table (PDP)} \\
+    3 & \textit{Page Directory Table (PD)} \\
+    4 & \textit{Page Table (PT)} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Die Seitenverzeichnisse/-tabellen liegen im Hauptspeicher und bestehen aus 64-Bit
+Einträgen von denen die oberen Bits die physische Adresse eines/einer
+folgenden Seitenverzeichnisses/-tabelle bzw. einer Seite bilden.  Die unteren
+neun Bits zeigen verschiedene Seiten-Attribute an, wie in
+Tabelle~\ref{tbl:page_table_entry_bits} erläutert.  Die
+Seitenverzeichnisse/-tabellen werden über Bitfelder in der virtuellen Adresse
+indiziert wie in Abbildung~\ref{fig:pt_vaddr} dargestellt. Die unteren Bits der
+virtuellen Adresse bilden einen Offset in die Seite selbst.
+
+\begin{table}
+  \centering
+  \caption{x86\_64 Seiten-Attribute}
+  \vspace{10pt}
+  \label{tbl:page_table_entry_bits}
+  \rowcolors{2}{}{gray!10}
+  \begin{tabularx}{\linewidth}{rlX}
+    \toprule
+    Bit & Bezeichung & Beschreibung \\
+    \midrule
+    0 & \textit{Present} &
+    Die Seite befindet sich im Hauptspeicher (d.h. sie ist nicht etwa in den
+    Hintergrundspeicher ausgelagert). Ist dieses Bit beim Zugriff auf eine Seite
+    nicht gesetzt, wird ein Seitenfehler ausgelöst.\vspace{\baselineskip} \\
+    1 & \textit{Read/Write} &
+    Ist dieses Bit gesetzt, kann die Seite von User-Mode Code beschrieben werden%
+    \footnote{Kernel-Mode Code hat immer Schreibrechte es sei denn das
+    \textit{Write Protect (WP)} Bit in \texttt{CR0} ist gesetzt.}.\vspace{\baselineskip}  \\
+    2 & \textit{User/Supervisor} &
+    Ist dieses Bit nicht gesetzt, kann nur Kernel-Mode auf die Seite zugreifen.\vspace{\baselineskip}  \\
+    3 & \textit{Write-Through} &
+    Ist dieses Bit gesetzt, werden Änderungen an der Seite sofort in den
+    Hauptspeicher geschrieben.\vspace{\baselineskip}  \\
+    4 & \textit{Cache Disable} &
+    Ist dieses Bit gesetzt wird die Seite nicht gecached.\vspace{\baselineskip} \\
+    5 & \textit{Accessed} &
+    Der Prozessor setzt dieses Bit wenn lesend oder schreibend auf die Seite
+    zugegriffen wird. Das Betriebssystem ist dafür verantwortlich, dieses Bit
+    zurückzusetzen.\vspace{\baselineskip}  \\
+    6 & (Nur Seitentabellen) \textit{Dirty} &
+    Wie Accessed aber nur für schreibende Zugriffe.\vspace{\baselineskip}  \\
+    7 & (Nur Seitenverzeichnisse) \textit{Page Size} &
+    Bei 2 MiB/1 GiB großen Seiten ist dieses Bit im Seitenverzeichnis der
+    dritten/zweiten Stufe gesetzt.\vspace{\baselineskip}  \\
+    8 & (Nur Seitentabellen) \textit{Global} &
+    Als Global markierte Seiten werden nicht aus
+    dem \textit{Translation Lookaside Buffer (TLB)} geflusht wenn das
+    Kontrollregister \textit{CR3} modifiziert wird (typischerweise bei einem
+    Kontextwechsel).\vspace{\baselineskip} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{figure}
+  \begin{bytefield}[endianness=big,bitformatting={\small},bitwidth=.5em,bitheight=8ex]{64}
+    \begin{rightwordgroup}{4 KiB Seiten}
+        \bitheader{63, 48, 39, 30, 21, 12, 0} \\
+        \bitbox{16}{= 47}
+        \bitbox{9}{PML4}
+        \bitbox{9}{PDP}
+        \bitbox{9}{PD}
+        \bitbox{9}{PT}
+        \bitbox{12}{Offset in Seite}
+    \end{rightwordgroup}
+  \end{bytefield}
+
+  \vspace{1cm}
+
+  \begin{bytefield}[endianness=big,bitformatting={\small},bitwidth=.5em,bitheight=8ex]{64}
+    \begin{rightwordgroup}{2 MiB Seiten}
+        \bitheader{63, 48, 39, 30, 21, 0} \\
+        \bitbox{16}{= 47}
+        \bitbox{9}{PML4}
+        \bitbox{9}{PDP}
+        \bitbox{9}{PD}
+        \bitbox{21}{Offset in Seite}
+    \end{rightwordgroup}
+  \end{bytefield}
+
+  \vspace{1cm}
+
+  \begin{bytefield}[endianness=big,bitformatting={\small},bitwidth=.5em,bitheight=8ex]{64}
+    \begin{rightwordgroup}{1 GiB Seiten}
+        \bitheader{63, 48, 39, 30, 0} \\
+        \bitbox{16}{= 47}
+        \bitbox{9}{PML4}
+        \bitbox{9}{PDP}
+        \bitbox{30}{Offset in Seite}
+    \end{rightwordgroup}
+  \end{bytefield}
+  \caption{Aufbau einer virtuellen Adresse auf x86\_64}
+  \label{fig:pt_vaddr}
+\end{figure}
+
+Der vollständige Übersetzungsprozess für eine beliebige virtuelle Adresse
+$\mathtt{A_{virt}}$ läuft demnach folgendermaßen ab:
+
+Die Basis-Adresse des ersten Seitenverzeichnisses wird an den oberen Bits des
+Kontrollregisters \texttt{CR3}, dem \textit{Page Directory Base Register
+(PDBR)}) abgelesen.  Der entsprechende Eintrag $\mathtt{E_{PML4}}$ befindet
+sich an Adresse $\mathtt{PDBR} + \mathtt{A_{virt}[PML4]}$.  Ist in diesem das
+Present Bit nicht gesetzt, wird ein Seitenfehler ausgelöst. Ansonsten wird die
+Basis-Adresse des zweiten Seitenverzeichnisses als $\mathtt{E_{PML4}[12:M-1]} +
+\mathtt{A_{virt}[PDP]}$\footnote{\texttt{M} ist hier prozessorabhängig.}
+bestimmt.
+
+Dieser Prozess setzt sich fort, bis man entweder im vierten Übersetzungsschritt
+bei der Seitentabelle angekommen ist oder in einem Seitenverzeichnis-Eintrag
+das Page Size Bit gesetzt ist. In beiden Fällen setzt sich die physische
+Adresse dann aus den oberen Bits des Seitentabellen-Eintrages und den bisher
+ungenutzen unteren Bits der virtuellen Adresse zusammen.
+
+Listing~\ref{lst:pt_level_next} zeigt vereinfacht die Implementierung dieses
+Übersetzungsprozesses. Man beachte, dass in jedem Übersetzungsshritt von
+\texttt{Cached\_gphys\_to\_hvirt} Gebrauch gemacht wird, um die aus den
+Seitenverzeichnisse/-tabellen ausgelesenen physischen Gast-Adressen in
+virtuelle Host-Adressen umzuwandeln.
+
+\begin{mintlisting}[label=lst:pt_level_next]{mintcpp}{Von einem Seitenverzeichnis zum nächsten}
+l4_addr_t Pt_walker::gphys_to_hvirt(l4_addr_t gphys)
+{
+  l4_addr_t hvirt;
+  L4Re::chksys(_cached_gphys_to_hvirt.lookup(gphys, &hvirt),
+               "Translate guest physical to host virtual address");
+  return hvirt;
+}
+
+Vmm::Pt_walker::Level Vmm::Pt_walker::Level::next() const
+{
+  // if we are at the last stage of the lookup, Level::resolve_addrs() has to
+  // be called instead in order to retrieve the resolved address
+  if (_pt_level == 4 || (_pt_level > 1 && (_pt_entry & Page_size_bit)))
+    L4Re::chksys(-L4_EINVAL, "Level is not a leaf");
+
+  l4_uint64_t pt_base_next =
+    _pt_level == 0 ? _pt_walker->gphys_to_hvirt(_pt_entry & ~Cr3_pcd_pwt_mask) :
+    _pt_walker->gphys_to_hvirt(_pt_entry & _pt_walker->_phys_addr_mask_4k);
+
+  l4_uint64_t pt_index_next =
+     _pt_level == 0 ? __virt_addr.pml4() :
+     _pt_level == 1 ? __virt_addr.pdpt() :
+     _pt_level == 2 ? __virt_addr.pd() :
+     _virt_addr.pt();
+
+  l4_uint64_t pt_entry_next = reinterpret_cast<l4_uint64_t *>(pt_base_next)[pt_index_next];
+
+  return Level(/* ... */);
+}
+
+void Pt_walker::Level::resolve_addrs(l4_uint64_t *gphys, l4_uint64_t *hvirt)
+{
+  l4_uint64_t base_addr, offset;
+
+  switch (_pt_level)
+    {
+    case 2:
+      base_addr = _pt_entry & _pt_walker->_phys_addr_mask_1g;
+      offset = _virt_addr.raw & G1_offset_mask;
+      break;
+    case 3:
+      base_addr = _pt_entry & _pt_walker->_phys_addr_mask_2m;
+      offset = _virt_addr.raw & M2_offset_mask;
+      break;
+    default:
+      base_addr = _pt_entry & _pt_walker->_phys_addr_mask_4k;
+      offset = _virt_addr.raw & K4_offset_mask;
+      break;
+    }
+
+  *gphys = base_addr + offset;
+  *hvirt = _pt_walker->gphys_to_hvirt(*gphys);
+}
+\end{mintlisting}
+
+Listing~\ref{lst:pt_example_x86} zeigt die Anwendung des zugehörigen Command
+Handlers. Dieser nutzt intern \texttt{Vmm::Pt\_walker} um eine gegebene
+virtuelle Gast-Adresse Schritt für Schritt zu übersetzen und gibt dabei in jedem
+Schritt alle für den Übersetzungsprozess relevante Informationen aus. Damit wird
+es z.B möglich manuell mittels Assembly Code in einem Gast aufgesetzte
+Übersetzungs-Schemata ,,live'' zu debuggen.
+
+\begin{mintlisting}[label=lst:pt_example_x86]{minttext}{\texttt{pt} Monitor Befehl (x86\_64)}
+~\color{red}{monitor>}~ help pt
+Usage:
+* pt: Display page table walk
+~\color{red}{monitor>}~ pt ffffffff8107bbb0
+CR3:
+|Page Directory Base (52)|...|PCD|PWT|...|
+|         0x000000000b302|...|  0|  0|...|
+
+Page table @ 0x000000000c502000, entry 511:
+|Base (52)      |USR|G|0|0|A|C|W|U|R|P|
+|0x0000000002216|000|0|0|1|1|0|0|1|1|1|
+
+Page table @ 0x0000000003416000, entry 510:
+|Base (52)      |USR|G|0|0|A|C|W|U|R|P|
+|0x0000000002217|000|0|0|1|1|0|0|0|1|1|
+
+Page table @ 0x0000000003417000, entry 8:
+|Base (52)      |USR|G|0|0|A|C|W|U|R|P|
+|0x0000000001000|000|0|1|1|1|0|0|0|1|1|
+
+Guest physical address: 0x000000000107bbb0
+Host virtual address: 0x000000000227bbb0
+\end{mintlisting}
+
+In Listing~\ref{lst:pt_example_x86} ist der Gast ein Linux System und die
+übersetzte Adresse entspricht dem Einstiegspunkt, der während jedem Hardware
+Timer Interrupt aufgerufenen Funktion \texttt{scheduler\_tick}, wie im mit
+\texttt{objdump} erzeugten Ausschnitt des Gast-Disk-Images in
+Listing~\ref{lst:sched_tick_dump} verdeutlicht wird.
+
+\begin{mintlisting}[label=lst:sched_tick_dump]{minttext}{\texttt{scheduler\_tick} Linux Kernel Dump}
+ffffffff8107bbb0 <scheduler_tick>:
+scheduler_tick():
+ffffffff8107bbb0:       53                      push   %rbx
+ffffffff8107bbb1:       48 8b 1d 80 c6 1c 01    mov    0x11cc680(%rip),%rbx
+ffffffff8107bbb8:       e8 d3 15 00 00          callq  ffffffff8107d190 <sched_clock_tick>
+...
+\end{mintlisting}
+
+Der Übersetzungsprozess für ARM Prozessoren ist fundamental ähnlich, aber teils
+komplizierter, da verschiedene \textit{Paging Modes} (nämlich \textit{Short}
+and \textit{Long Descriptor Format}) unterstützt werden. Zudem sind hier die
+Unterschiede zwischen 64 und 32-Bit Modus größer.
+Listing~\ref{lst:pt_example_arm64} zeigt den gleichen Übersetzungsprozess für
+ARM64\footnote{Man beachte, dass virtuelle und physische Adressen von
+\texttt{scheduler\_tick} natürlich architekturebhängig sind.}.
+
+\begin{mintlisting}[label=lst:pt_example_arm64]{minttext}{\texttt{pt} Monitor Befehl (ARM64)}
+~\color{red}{monitor>}~ pt ffffff80100f6270
+AArch64 guest
+
+TTBR1:
+|ASID (16)|BADDR (48)    |
+|   0x0004|0x000045088000|
+
+Level 1 Page table @ 0x0000000045088000, entry 0:
+|NS|AP|XN|PXN|...|Next table (36)|...|1|1|
+| 0|00| 0|  0|...|    0x00004c3fe|...|1|1|
+
+Level 2 Page table @ 0x000000004c3fe000, entry 128:
+|NS|AP|XN|PXN|...|Next table (36)|...|1|1|
+| 0|00| 0|  0|...|    0x00004c3fd|...|1|1|
+
+Level 3 Page table @ 0x000000004c3fd000, entry 246:
+|...|Software (4)|UXN|PXN|Cont|...|Output address (36)|nG|AF|SH|AP|NS|AttrIndex|0|1|
+|...|         0x1|  1|  0|   1|...|        0x0000444f6| 0| 1|11|10| 0|      100|1|1|
+
+Guest physical address: 0x00000000444f6270
+Host virtual address: 0x00000000012f6270
+\end{mintlisting}
+
+Obwohl uvmm prinzipiell neben x86 und ARM auch MIPS Architekturen unterstützt,
+wurde der Übersetzungsprozess für solche aus Zeitgründen nicht implementiert.
+
+\subsection{Device Trees}
+
+Ein Device Tree beschreibt in hierarchischem Format die einem Gast zur
+Verfügung stehenden Geräte, die sich nicht automatisiert erkennen lassen.
+uvmm verwendet das auch von Linux genutze Device Tree Format. Ein solcher
+Device Tree kann \textit{Knoten} und \textit{Properties} enhalten wobei
+letztere einfache \textit{Schlüssel-Wert} Paare sind. Knoten können ihrerseits
+weiter Knoten enhalten wie in Listing~\ref{lst:dt_example} dargestellt.
+
+\begin{mintlisting}[label=lst:dt_example]{minttext}{Beispielhafter Device Tree Aufbau}
+/ {
+    root-node {
+        property1 = "a string property";
+        property2 = <0x1 0x2 0x3>;
+
+        child-node {
+          // ...
+        };
+    };
+    // ...
+};
+\end{mintlisting}
+
+Problematisch ist dabei, dass der Device Tree bereits zur Kompilierzeit mittel
+des \textit{Device Tree Compilers} \texttt{dtc} vom gezeigten menschenlesbaren
+Format (\texttt{.dts}) in ein Binärdatei (\texttt{.dtb}) übersetzt wird. Diese
+steht uvmm dann an einer bestimmten Speicheradresse zur Verfügung und wird beim
+Start von uvmm noch mit weiteren Information wie z.B. Boot Argumenten
+,,angereichert''.
+
+Das Monitor Interface muss daher den (modifizierten) Device Tree
+\textit{dekompilieren} um ihn wieder menschlenlesbar auszugeben.  Dazu
+durchläuft der entsprechende Command Handler \texttt{Dt\_cmd\_handler} alle
+Knoten des Device Trees per Breitensuche und gibt Namen und Wert aller in
+diesen enthaltenen Properties aus. Dabei ist es teilweise notwendig, den
+Datentyp des Wertes zu ,,raten'' wenn diese Information nicht im Binärformat
+kodiert ist. D.h. die Korrektheit der Dekompilierung ist nicht garantiert.
+Mögliche Datentypen sind z.B. (Listen von) Strings, (Arrays von) Zahlen,
+Verweise auf Device Tree Knoten (\textit{phandles}) usw.
+\texttt{Dt\_cmd\_handler} nutzt dabei die \texttt{libfdt} Bibliothek zur Device
+Tree Manipulation Listing~\ref{lst:dt_cmd} zeigt ein Beipspiel für die Nutzung
+des zugehörigen Monitor Befehls.
+
+\begin{mintlisting}[label=lst:dt_cmd]{minttext}{\texttt{dt} Monitor Befehl}
+~\color{red}{monitor>}~ help dt
+Usage:
+* dt: Device tree source
+~\color{red}{monitor>}~ dt
+/dts-v1/;
+
+/ {
+    #address-cells = <0x2000000>;
+    #size-cells = <0x2000000>;
+    compatible = "l4,virt", "linux,dummy-virt";
+    model = "L4 VM";
+
+    chosen {
+        bootargs = "console=hvc0 ramdisk_size=13000 root=/dev/ram1 nokaslr";
+        linux,initrd-end = <0x0000300c>;
+        linux,initrd-start = <0x0000000c>;
+    };
+
+    cpus {
+        #address-cells = <0x1000000>;
+        #size-cells = <0x0>;
+
+        cpu0 {
+            #address-cells = <0x2000000>;
+            #size-cells = <0x2000000>;
+            compatible = "virt-intel";
+            device_type = "cpu";
+            reg = <0x0>;
+        };
+    };
+
+    // ...
+\end{mintlisting}

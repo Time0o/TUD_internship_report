@@ -1,0 +1,83 @@
+\section{Code-Coverage}
+
+Um die Auswertung von Unit-Tests zu verbessern, sollte automatisierte
+Line-Coverage in das existierende Test-System integriert werden.
+
+Das L4Re Build-System unterstützt hauptsächlich den \textit{GNU C Compiler
+(gcc)}.  Mit diesem lassen sich Code-Coverage Daten erzeugen, indem zu
+analysierende Programme mit speziellen Flags kompiliert und gelinkt werden.
+Diese sorgen dafür, dass zunächst in den im Kompilierungs-Schritt erzeugten
+Object-Files Maschinen-Code eingebaut wird, der bei Ausführung dafür sorgt,
+dass u.a. die Anzahl der Abarbeitungen für jede nicht heraus-optimierte
+Quellcode-Zeile in speziellen Datenstrukturen festgehalten wird. Außerdem
+werden die Programme gegen zusätzlichen Code gelinkt, der vor Ausführung von
+\texttt{main} einen Exit-Handler registriert. In diesem werden gegen Ende des
+Programms die in einer statisch allokierten verketteten Liste (mit einem
+Listen-Element für jedes Object-File aus dem das ausgeführte Programm erzeugt
+wurde) gespeicherten Coverage-Daten in ein binäres Datenformat umgewandelt und
+im Dateisystem neben den Quellcode-Dateien, aus denen das Programm erzeugt
+wurde, abgelegt. Genau genommen werden pro Quellcode-Datei zwei für die
+Generierung von Coverage-Dateien relevante Dateien erzeugt: eine Datei im
+\texttt{.gcno} Format wird bereits während des Compilierungs-Schrittes
+generiert. Nach Programmausführung entsteht wie beschrieben zusätzlich eine
+\texttt{.gcda} Binärdatei. Beide werden benötigt um menschenlesbare
+Coverage-Reports zu generieren.
+
+Im Zusammenhang mit L4Re ist hier problematisch, dass die derartige Erzeugung
+von Coverage-Daten das Vorhandensein eines Dateisystems voraussetzt.  Diese
+Bedingungen ist für die in einer virtuellen Maschine ausgeführten Unit-Tests
+nicht gegeben. Vielmehr wäre es wünschenswert, die Daten auf der seriellen
+Konsole auszugeben, sodass sie bei Testausführung gegebenenfalls von einem
+Wrapper-Skript geparst und im Dateisystem des Host-Systems abgelegt werden
+können. Mit dem intern zur Test-Ausführung verwendeten Perl 5 Programm
+\textit{Tapper} existierte bereits ein solches Wrapper-Skript, welches bisher
+aber nur die bei Ausführung von Tests auf der seriellen Konsole ausgegebenen
+Ergebnisse parsen und für den Nutzer in ein ,,angenehmeres'' Format
+transformieren konnte.
+
+Die Funktionen zur Ausgabe von Coverage Daten sind in gcc in
+\texttt{libgcc/gcov.h} und \texttt{gcc/gcov*} implementiert. Sie lassen sich
+durch eine eigene Implementierung ersetzen, indem eine mit
+\texttt{-fprofile-arcs} und \texttt{-ftest-coverage} kompilierte Objekt-Datei
+gegen eine solche gelinkt wird. Listing~\ref{lst:gcov} zeigt den
+,,alternativen'' gcov Exit-Handler, welcher die Coverage-Daten mittels
+\texttt{printf} ausgibt anstatt sie in eine Datei zu schreiben. Die Marker
+\texttt{GCOV GCDA/DATA/DONE} können später von Tapper erkannt werden. Tapper
+schreibt dann die im Hexadezimal-Format ausgegebenen Binärdaten in die
+angegebenen \texttt{.gcda} Datei im Host-Dateisystem.
+
+\begin{mintlisting}[label=lst:gcov]{mintc}{Modifizierter gcov Exit-Handler}
+static void __attribute__((destructor))
+gcov_exit(void)
+{
+  /* buffer to hold extracted gcda data */
+  enum { Buf_sz = 1 << 15 };
+
+  static char output_buffer[Buf_sz];
+
+  /* iterate over the list of coverage data nodes */
+  struct gcov_info *tmp = __gcov_master.list_start;
+
+  while (tmp)
+    {
+      /* dump gcda path */
+      printf("GCOV GCDA %s\n", gcov_info_filename(tmp));
+
+      /* dump coverage data */
+      size_t buf_sz = convert_to_gcda(NULL, tmp);
+      assert(buf_sz < Buf_sz);
+
+      convert_to_gcda(output_buffer, tmp);
+
+      printf("GCOV DATA ");
+      for (size_t i = 0; i < buf_sz; ++i)
+        printf("%02X", (output_buffer[i] & 0xff));
+      putchar('\n');
+
+      /* continue with the next coverage data node */
+      tmp = tmp->next;
+    }
+
+  printf("GCOV DONE\n");
+}
+\end{mintlisting}

@@ -1,0 +1,19 @@
+\section{uvmm}
+\label{sec:uvmm}
+
+uvmm ist ein auf L4Re basierter \textit{Virtual Machine Monitor/Hypervisor}.
+Eine uvmm Instanz ist ein gewöhnliches L4Re User-Space Programm, welches ein
+virtualisiertes Gast-System ausführt. Dabei ermöglicht uvmm das Ausführen von
+Gast-Images, die für die gleiche Architektur gebaut wurden, auf der uvmm
+ausgeführt wird; Unterstützt werden bisher x86, ARM und MIPS.
+
+uvmm mappt dabei den gesamten physischen Speicher eines Gastes in seinen
+virtuellen Adressraum und vermittelt alle Interaktionen zwischen dem Gast und
+der Hardware. U.a. existiert mit \textit{L4virtio} eine Implementierung des
+\textit{Virtio} Standards für L4Re die schnellen Hauptspeicher-Zugriff und hohe
+Netzwerk-Performance durch Kooperation von Treibern und Hypervisor (in diesem
+Fall uvmm) ermöglicht.
+
+Eine klassische Anwendungsmöglichkeit von uvmm ist das Ausführen mehrerer
+von der Hardware und teils oder ganz voneinander isolierten Linux Instanzen in
+sicherheitskritischen Anwendungen.

@@ -1,0 +1,92 @@
+\RequirePackage[ngerman=ngerman-x-latest]{hyphsubst}
+
+\documentclass[ngerman]{tudscrreprt}
+
+\input{../tex/preamble.tex}
+
+\begin{document}
+
+\sloppy
+
+\faculty{Fakultät für Elektrotechnik und Informationstechnik}
+
+\title{Bericht Fachpraktikum}
+
+\author{%
+  Timo Nicolai
+  \course{Informationssystemtechnik}
+  \matriculationnumber{4048209}
+}
+
+\authormore{geb. 03.08.1994, Flensburg}
+
+\headingsvskip=-100pt
+
+\maketitle
+
+\confirmation
+
+\tableofcontents
+
+\pagebreak
+
+\chapter{Einleitung}
+
+Vom 11.09.2017 bis zum 20.07.2018 war ich als Werkstudent und später vom
+17.06.2019 bis zum 20.10.2019 als Vollzeit-Praktikant bei der Kernkonzept GmbH
+angestellt.
+
+Kernkonzept entwickelt das \textit{L4Re Mikrokernel-Betriebssystem}.
+Die Entwicklung begann als Forschungsprojekt an der Professor für
+Betriebssysteme der TU Dresden. Das Unternehmen wurde von ehemaligen/noch an
+der Universität arbeitenden wissenschaftlichen Mitarbeitern gegründet. L4Re
+wird zudem weiterhin zu Lehrzwecken an der Universität eingesetzt.
+
+Kapitel~\ref{ch:background} dient der Einführung in die technischen Grundlagen
+meiner Arbeit. Abschnitt~\ref{sec:mkos} beschreibt dabei die Grundidee hinter
+Mikrokernel-Betriebssystemen und gibt eine Einführung in deren historische
+Entwicklung sowie aktuelle Forschungs-Richtungen.  Abschnitte~\ref{sec:l4re}
+und \ref{sec:l4re_pi} gehen dann spezifisch auf L4Re ein, es wird insbesondere
+ein anschauliches L4Re-Beispielprogramm motiviert und erläutert um das
+Verständnis späterer Darstellungen zu erleichtern.  Kapitel~\ref{ch:projects}
+beschreibt schließlich die wichtigsten Projekte an denen ich während meiner
+Zeit bei Kernkonzept gearbeitet habe und Kapitel~\ref{ch:conclusion} enthält
+ein kurzes Fazit.
+
+\vspace{\baselineskip}
+
+\noindent
+Hinweis: Für eine Farbkopie dieses Berichtes im PDF-Format, senden Sie eine
+Mail an \url{timo.nicolai@mailbox.tu-dresden.de}.
+
+\chapter{Stand der Technik}
+\label{ch:background}
+
+\input{../tex/01_mkos.tex}
+\input{../tex/02_l4re.tex}
+\input{../tex/03_l4re_pi.tex}
+\input{../tex/04_uvmm.tex}
+
+\chapter{Projekte}
+\label{ch:projects}
+
+\input{../tex/05_ned.tex}
+\input{../tex/06_gcov.tex}
+\input{../tex/07_benchmark.tex}
+\input{../tex/08_uvmm_monitor.tex}
+
+\chapter{Fazit}
+\label{ch:conclusion}
+
+Während meiner Zeit bei Kernkonzept habe ich einigen sehr unterschiedlichen
+Projekten im L4Re Umfeld arbeiten können und dabei vor allem grundlegendes
+Wissen im Bereich Betriebssysteme/Mikrokernel erworben. Einige meiner Beiträge
+werden auch nach Ende meiner Tätigkeit noch intern eigesetzt und sind teilweise
+in den öffentlich verfügbaren L4Re Quellcode eingeflossen.
+
+\newpage
+
+\bibliography{bibliography}
+\bibliographystyle{unsrt}
+
+\end{document}

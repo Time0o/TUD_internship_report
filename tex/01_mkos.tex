@@ -1,0 +1,100 @@
+\section{Mikrokernel-Betriebssysteme}
+\label{sec:mkos}
+
+\subsection{Grundidee}
+
+Mikrokernel sind Betriebssystem-Kernel die lediglich minimale, zur Konstruktion
+eines vollständigen Betriebssystems nötige, Funktionalität implementieren, z.B.
+Adressräume, Threads und Interprozesskommunikation.
+
+Im Gegensatz zu \textit{monolithischen} Betriebssystemen (wie zum Beispiel
+GNU/Linux) werden klassischerweise vom privilegierten Kernel ausgeführte
+Grundfunktionen des Systems (z.B. Geräte-Treiber) in User-Space Programme
+ausgelagert. Das Grundprinzip hinter modernen Mikrokerneln lautet hierbei
+\textit{,,capability, not policy''}: Der Kernel stellt idealerweise lediglich
+die zur Nutzung der unterliegenden Hardware nötige minimale Funktionalität
+bereit, trifft aber keine strategischen Entscheidungen. Dies wird stattdessen
+von einer Reihe von User-Space Programmen übernommen\footnote{Diese Darstellung
+ist eine Idealisierung, in der Praxis kann es Sinn ergeben, besonders
+Performance-kritische Funktionalität wie z.B.  Scheduling in den Kernel zu
+integrieren auch wenn dies das genannte Prinzip verletzt.}
+
+Vorteil ist dabei die verbesserte Stabilität und Sicherheit des Systems.  Ein
+kompliziertes System wie Linux mit vielen Millionen Code-Zeilen ist sehr
+anfällig für unentdeckte Fehler, welche die Stabilität des Systems gefährden
+oder zum Beispiel von einem Angreifer ausgenutzt werden können, um
+privilegierte Programme auszuführen.  Die Sicherheit eines Mikrokernels, der in
+nur einigen zehntausend Zeilen Code implementiert ist, kann dagegen mit
+realistischem Aufwand sehr genau überprüft werden.  Selbst wenn es einem
+Angreifer gelingt, ein User-Space Programm zu kompromittieren, bleibt zudem die
+Integrität des Kernels unberührt und der potentielle Schaden ist deutlich
+geringer da das entsprechende Programm im Bedarfsfall beendet und neu gestartet
+werden kann und ohnehin als User-Space Programm nur indirekten Hardware-Zugriff
+hat.
+
+Ein weiterer Vorteil ist die Modularität des Systems, User-Space Komponenten
+mit identischen Schnittstellen können (sogar zur Laufzeit) untereinander
+ausgetauscht werden (vergleichbar mit heute weitverbreiteten
+\textit{Microservices}) und das gesamte System lässt sich potentiell einfacher
+auf verschiedene physische Maschinen verteilen.
+
+Problematisch ist unter Umständen die Performance des Systems: Mikrokernel
+machen viel größeren Gebrauch von Interprozesskommunikation als monolithische
+Kernel und diese ist zudem oft synchron. Eine der Herausforderungen bei der
+Entwicklung eines Mikrokernel-Systems ist die bestmögliche Bewältigung solcher
+Performance-Hürden.
+
+\subsection{Historische Entwicklung}
+
+Die Grundidee hinter Mikrokernel-Betriebssystemen existiert bereits seit den
+60er Jahren~\cite{rc4000}. Frühe Mikrokernel, z.B. Mikrokernel Varianten von
+\textit{Mach}~\cite{mach} litten vor allem unter Performance Problemen bei der
+Interprozesskommunikation.
+
+Großer Fortschritt in diesem Bereich gelang Jochen Liedtke.  Dieser stellte die
+These auf, dass schlechte Performance kein inhärentes Problem des
+Mikrokernel-Ansatzes, sondern das Resultat suboptimaler Implementierungen war
+und entwickelte \textit{L3}~\cite{l3} in dem Interprozesskommunikation über 20
+mal schneller war als in Mach. L3 war dabei noch kompakter als vorangegangene
+Mikrokernel.
+
+Mit \textit{L4}~\cite{l4} wurde später ein weiterer Mikrokernel entwickelt,
+dessen Hauptziel hohe Performance war und der einige weitere in Mach präsente
+Probleme umging. Damit wurde die Ära der kompakten und performanten Mikrokernel
+der \textit{zweiten Generation} eingeleitet. Es folgten eine Reihe von von L4
+basierten Systemen, z.B. \textit{L4Ka::Pistachio}, \textit{L4/MIPS},
+\textit{L4/Fiasco} und \textit{OKL4}.
+
+Spätere Mikrokernel der \textit{dritten Generation} legten dann den Fokus auf
+\textit{Capabilities}, Virtualisierung und Verifizierbarkeit.
+
+Capabilities sind dabei ein Mechanismus zur Zugriffs-Kontrolle.  Um auf eine
+Ressource (z.B. Speicher) zuzugreifen, muss ein Programm eine Capability auf
+diese besitzen.  Capabilities können zwischen Programmen ausgetauscht werden,
+z.B. kann der Erzeuger einer Ressource Zugriff auf diese an eine Reihe von
+Verbraucher weiterleiten. Eine Capability ist sowohl ein Zeiger auf als auch eine
+Zugriffs-Berechtigung für einer Ressource.  Zugriffs-Verwaltung lässt sich somit
+in den User-Space auslagern. Dieses Prinzip ist deutlich eleganter als
+Zugriffs-Verwaltung unter UNIX-ähnlichen Systemen, in denen der Kernel bei
+jedem Zugriff auf eine Ressource die Berechtigungen des ausführenden Programmes
+überprüfen muss.
+
+Capabilities waren bereits in Mikrokerneln der ersten Generation, z.B. Mach
+implementiert aber aus Performance-Gründen kein Teil mehr von Mikrokerneln der
+zweiten Generation.  Diese verwendeten alternative Ansätze die sich im
+Nachhinein als suboptimal entpuppten. Mikrokernel der dritten Generation
+implementieren Capabilities auf effizientere Art und Weise, die es gleichzeitig
+erlaubt, die Verfügbarkeit von Ressourcen besser zu verfolgen.
+
+Manche Mikrokernel der dritten Generation werden häufig als Hypervisor (z.B.
+für ,,unsichere'' monolithische Systeme wie GNU/Linux) eingesetzt, ein Beispiel
+ist \textit{Fiasco.OC}~\cite{fiasco}. Da dabei vor allem (sowohl akademisches
+als auch kommerzielles) Interesse an der Sicherheit solcher Systeme besteht,
+ist Verifizierbarkeit ein aktueller Trend. Mit \textit{seL4}~\cite{sel4}
+existiert so z.B. ein Mikrokernel, dessen Sicherheit (ausgehend von gewissen
+Axiomen) mathematisch bewiesen ist.
+
+Neben der L4 Familie existieren heute viele weitere ganz oder teilweise den
+Mikrokernel-Ansatz verfolgende Betriebssysteme. Beispiele sind das Andrew S.
+Tanenbaum ursprünglich als Lehrsystem entwickelte \textit{Minix}, der von
+Linux unabhängige \textit{GNU Hurd} Kernel und Googles \textit{Fuchsia/Zircon}.

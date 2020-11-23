@@ -1,0 +1,234 @@
+\section{Die L4Re Programmschnittstelle}
+\label{sec:l4re_pi}
+
+Der folgende Abschnitt beschreibt kurz die Entwicklung eines L4Re Programmes
+und geht dabei insbesondere auf \textit{Capabilities} und
+\textit{Interprozesskommunikation (IPC)} rein.
+
+\textit{Capabilities} sind ein zentraler L4Re Mechanismus. Eine Capability ist
+ein Pointer auf ein vom Kernel verwaltes Objekt. Der Kernel verwaltet pro
+Task\footnote{Die Begriffe \textit{Task} und \textit{Thread} tragen im L4Re
+Kontext nicht dieselben Bedeutungen wie z.B. unter Linux:
+\begin{itemize}
+  \item[\textbf{Task}]
+    Abstrahiert einen virtuellen Adressraum und den Zugriff auf Kernel-Objekte
+    über Capability Index Arrays.
+  \item[\textbf{Thread}]
+    Ausführungsstrang, enkapsuliert Ausführungszustand, CPU Zustand,
+    Scheduling Parameter etc. Threads können an Tasks gebunden werden und
+    erhalten über diese Zugriff auf deren virtuellen Adressraum und Capabilities.
+    Dabei ist es Threads möglich, sich zur Laufzeit von einem Task loszulösen
+    und sich an einen anderen Task zu binden.
+  \item[\textbf{Programm}]
+    Alleinstehende L4Re Anwendungen die aus einem Task und mehreren Threads
+    bestehen können.
+\end{itemize}}
+ein Array von Capability-Indizes. Jeder Eintrag in diesem Array referenziert
+ein Kernel Objekt und über Angabe des zugehörigen Indizes kann der Task dessen
+Funktionalität nutzen, vorausgesetzt die Capability besitzt ausreichende
+Rechte.
+
+Der Datenaustausch zwischen einem Task und einem Kernel Objekt
+geschieht dabei über einen \textit{User Thread Control Block (UTCB)}. UTCBs
+sind Speicherbereiche die vom Kernel für jeden an einen Task gebundenen
+Thread bereitgestellt werden.
+
+Die vielleicht wichtigsten Kernel Objekte sind \textit{IPC Gates}. Diese
+implementieren Kommunikationskanäle zur Interprozesskommunikation zwischen
+Threads, welche von einem Thread gelesen und von mehreren nebenläufig
+beschrieben werden können. Über IPCs können dabei sowohl Daten als auch
+Resourcen ausgetauscht werden. Capabilities werden dabei per \textit{Flexpages}
+übertragen. Diese beschreiben Regionen im Adressraum des sendenden Threads
+zusammen mit Typ- und Zugriffsrecht-Informationen. Über diesen Mechanismus
+können Capabilities ,,weitergereicht'' werden (aber jeweils nur mit gleichen
+oder weiter eingeschränkten Rechten). Z.B. ist es dadurch möglich mittels
+\textit{Dataspace} Capabilities geteilten Speicher zwischen unterschiedlichen
+L4Re Programmen zu realisieren.
+
+Die Nutzung von Capabilities zur Kommunikation zwischen zwei L4Re Programmp
+soll nun anhand der Beispiel-Anwendung \texttt{l4re\_ipc\_example}
+veranschaulicht werden. Listing~\ref{lst:l4re_ipc_example_tree} zeigt die für
+L4Re Anwendungen typische Paket-Struktur von \texttt{l4re\_example}.
+
+\begin{mintlisting}[label=lst:l4re_ipc_example_tree]{minttext}{\texttt{l4re-ipc-example} Verzeichnisstruktur}
+l4re-ipc-example
+├── configs
+│   ├── l4re_ipc_example.cfg
+│   └── modules.list
+├── server
+│   ├── src
+│   │   ├── l4re_ipc_example_common.c
+│   │   ├── l4re_ipc_example_common.h
+│   │   ├── l4re_ipc_example_receiver.c
+│   │   ├── l4re_ipc_example_sender.c
+│   │   └── Makefile
+│   └── Makefile
+└── Makefile
+\end{mintlisting}
+
+Die Anwendung besteht aus zwei Programmen, \texttt{l4re\_ipc\_example\_sender} und
+\texttt{l4re\_ipc\_example\_receiver}. Das sendende Programm überträgt per IPC einen
+beliebigen Block Text an das empfangende Programm, welches ihn nach
+\texttt{stdout} ausgibt.
+
+Die beiden Programme werden zur Laufzeit durch das \textit{Ned Skript}
+\texttt{l4re\_ipc\_example.cfg} gestartet und miteinander verknüpft. Ned ist
+ein L4Re Programm, welches es ermöglicht, mittels Lua Skripten Capabilities zu
+erzeugen, sowie L4Re Programme zu starten, denen diese Capabilities über ihr
+ursprüngliches \textit{Environment} zur Verfügung gestellt werden können.
+Listing~\ref{lst:l4re_ipc_example_ned} zeigt den Quelltext dieses Ned Skripts.
+In diesem wird zunächst die IPC Gate Capability \texttt{chan\_cap} erzeugt.
+Dann werden Sender- und Empfänger-Programm gestartet und in diese jeweils
+\texttt{chan\_cap} unter dem Namen \texttt{"cap"} hereingereicht.
+
+\begin{mintlisting}[label=lst:l4re_ipc_example_ned]{mintlua}{\texttt{l4re\_ipc\_example.cfg}}
+local l4 = require 'L4'
+local l = l4.default_loader
+
+chan_cap = l:new_channel()
+chan_capname = 'cap'
+
+l:start({ caps = { [chan_capname] = chan_cap },
+          log = { 'snd', 'blue' } },
+        'rom/l4re_ipc_example_sender ' .. chan_capname)
+
+l:start({ caps = { [chan_capname] = chan_cap:svr() },
+          log = { 'rcv', 'green' } },
+        'rom/l4re_ipc_example_receiver ' .. chan_capname)
+\end{mintlisting}
+
+Die Datei \texttt{modules.list}
+beschreibt die zur Ausführung der Beispiel-Applikation notwendigen Programme und
+Skripte wie in Listing~\ref{lst:l4re_ipc_example_modules_list} gezeigt.
+
+\begin{mintlisting}[label=lst:l4re_ipc_example_modules_list]{minttext}{\texttt{modules.list}}
+/* 1 */ entry l4re-example
+/* 2 */ kernel fiasco
+/* 3 */ roottask moe rom/l4re_ipc_example.cfg
+/* 4 */ module l4re
+/* 5 */ module ned
+/* 6 */ module l4re_ipc_example_sender
+/* 7 */ module l4re_ipc_example_receiver
+/* 8 */ module l4re_ipc_example.cfg
+\end{mintlisting}
+
+Zeile 2 gibt hier den Namen der zu verwendenden Kernel-Binärdatei an. Zeile 3
+definiert das nach dem Booten von Fiasco auszuführende L4Re-Programm, dies ist
+in fast allen Fällen \texttt{Moe}. Moe ist der L4re \textit{Root-Task} der u.a.
+den gesamten den User-Space Programmen zur Verfügung stehenden Arbeitsspeicher
+verwaltet.  Zusätzlich werden die Pakete \texttt{l4re} und \texttt{ned}
+benötigt. Ersteres ist der L4Re-Kernel, letzteres implementiert die in
+\texttt{l4re\_ipc\_example.cfg} verwendete Lua-API.  Schließlich folgen die
+Programme selbst sowie das Ned-Skript \texttt{l4re\_example.cfg}. Man beachte,
+dass letzteres bereits in Zeile 3 auftaucht, dies ist ein Hinweis an Moe, nach
+der Initialisierung grundlegender System-Funktionen dieses Skript mittels der
+von Ned implementierten API auszuführen.
+
+Listings~\ref{lst:l4re_ipc_example_sender}
+und~\ref{lst:l4re_ipc_example_receiver} zeigen den (gekürzten) Quellcode des
+Sender- und Empfänger-Programms. Man beachte, dass hier der Einfachheit halber
+mit Funtionen aus dem C Interface von L4Re gearbeitet wird. Das Packet
+\texttt{l4re-core}, welches den Großteil dieser Funktionen bereitstellt, ist
+selbst überwiegend in C++ geschrieben, biete aber auch eine C API deren Nutzung
+an dieser Stelle deutlicher macht, was im Detail passiert.
+
+\begin{mintlisting}[label=lst:l4re_ipc_example_sender]{mintc}{\texttt{l4re\_ipc\_example\_sender.c}}
+/* text to be sent to receiving server */
+static char str[] = "Hello world";
+
+int
+main(int argc, char **argv)
+{
+  assert(argc == 2);
+
+  printf("Hello from sender\n");
+
+  /* get IPC capability */
+  l4_cap_idx_t chan = l4re_env_get_cap(argv[1]);
+
+  /* create dataspace */
+  l4re_ds_t ds = l4re_util_cap_alloc();
+
+  l4re_ma_alloc(sizeof(str), ds, 0);
+
+  /* copy text into dataspace */
+  l4_addr_t *addr = 0;
+  l4re_rm_attach((void **)&addr,
+                 sizeof(str),
+                 L4RE_RM_SEARCH_ADDR,
+                 ds,
+                 0,
+                 L4_PAGESHIFT);
+
+  memcpy(addr, str, sizeof(str));
+
+  /* send IPC message */
+  l4_fpage_t fpage = l4_obj_fpage(ds, 0, L4_FPAGE_RWX).raw;
+
+  l4_msg_regs_t *mr = l4_utcb_mr();
+  mr->mr[0] = l4_map_obj_control(0, 0);
+  mr->mr[1] = fpage;
+
+  l4_msgtag_t send_tag = l4_msgtag(IPC_LABEL, 0, 1, 0);
+
+  l4_ipc_send(chan, l4_utcb(), send_tag, L4_IPC_NEVER),
+
+  l4_sleep(100);
+
+  /* free allocated ressources */
+
+  /* ... */
+
+  printf("Goodbye from sender\n");
+
+  exit(EXIT_SUCCESS);
+}
+\end{mintlisting}
+
+\begin{mintlisting}[label=lst:l4re_ipc_example_receiver]{mintc}{\texttt{l4re\_ipc\_example\_receiver.c}}
+int
+main(int argc, char **argv)
+{
+  assert(argc == 2);
+
+  printf("Hello from receiver\n");
+
+  /* get IPC capability */
+  l4_cap_idx_t chan = l4re_env_get_cap(argv[1]);
+
+  /* bind capability to main thread */
+  l4_rcv_ep_bind_thread(chan, l4re_env()->main_thread, IPC_THREAD_LABEL);
+
+  /* receive IPC */
+  l4re_ds_t ds = l4re_util_cap_alloc();
+
+  l4_buf_regs_t *br = l4_utcb_br();
+  br->bdr = 0;
+  br->br[0] = ds | L4_RCV_ITEM_SINGLE_CAP | L4_RCV_ITEM_LOCAL_ID;
+
+  l4_msgtag_t tag;
+  l4_umword_t label;
+  l4_msgtag_t tag = l4_ipc_wait(l4_utcb(), &label, L4_IPC_NEVER);
+
+  if (label != IPC_THREAD_LABEL)
+    printf("Incorrect thread label\n");
+
+  if (l4_msgtag_label(tag) != IPC_LABEL)
+    printf("Incorrect tag label\n");
+
+  /* dump content of received dataspace */
+  l4_addr_t *addr = 0;
+  l4re_rm_attach((void **)&addr,
+                 l4re_ds_size(ds),
+                 L4RE_RM_SEARCH_ADDR,
+                 ds,
+                 0,
+                 L4_PAGESHIFT);
+
+  printf("Received: %s\n", (char *)addr);
+
+  printf("Goodbye from receiver\n");
+
+  exit(EXIT_SUCCESS);
+}
+\end{mintlisting}

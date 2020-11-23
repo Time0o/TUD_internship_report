@@ -1,0 +1,66 @@
+% packages
+\usepackage[ngerman]{babel}
+\usepackage{booktabs}
+\usepackage{bytefield}
+\usepackage{caption}
+%\usepackage{hyperref}
+\newcommand{\url}[1]{{\texttt{#1}}}
+\usepackage[utf8]{inputenc}
+\usepackage[outputdir=out]{minted}
+\usepackage{pmboxdraw}
+\captionsetup[table]{position=above}
+\usepackage{tabularx}
+\usepackage[svgnames,table]{xcolor}
+\usepackage[most]{tcolorbox}
+
+% commands
+\newtcolorbox[%
+  auto counter,
+  number within=section,
+  list inside=mypyg]{mintedbox}[2][]
+  {%
+    enhanced,
+    breakable,
+    enlarge top by=1ex,
+    enlarge bottom by=1ex,
+    before upper={\parindent15pt\noindent},
+    after={\noindent},
+    fonttitle=\bfseries,
+    title={Listing \thetcbcounter: #2},
+    list entry={\protect\numberline{\thetcbcounter}#2},
+    #1}
+
+\newminted[mintc]{c}{%
+  fontsize=\footnotesize,%
+  fontseries=b%
+}
+
+\newminted[mintcpp]{cpp}{%
+  fontsize=\footnotesize,%
+  fontseries=b%
+}
+
+\newminted[mintpython]{python}{%
+  fontsize=\footnotesize,%
+  fontseries=b%
+}
+
+\newminted[mintlua]{lua}{%
+  fontsize=\footnotesize,%
+  fontseries=b%
+}
+
+\newminted[minttext]{text}{%
+  fontsize=\footnotesize,%
+  fontseries=b,%
+  escapeinside=~~%
+}
+
+\newenvironment{mintlisting}[3][]
+ {\def\listingsboxenvironment{#2}
+  \VerbatimEnvironment%
+  \begin{mintedbox}[#1]{#3}%
+    \begin{\listingsboxenvironment}}%
+ {\end{\listingsboxenvironment}%
+  \end{mintedbox}%
+}
